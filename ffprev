@@ -1,0 +1,217 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use HTTP::Tiny;
+use JSON::PP;
+use POSIX qw(setsid);
+
+my $FFPREVPID  = $ENV{FFPREVPID} // ("/tmp/" . ($ENV{USER} // "") . ".ffprev.pid");
+my $FFPREVSID  = $ENV{FFPREVSID} // ("/tmp/" . ($ENV{USER} // "") . ".ffprev.sid");
+my $FFPREVBIN  = $ENV{FFPREVBIN};
+my $FFPREVPORT = $ENV{FFPREVPORT} // 4444;
+
+my $cmd_name = $0 =~ s/.*\///r;
+my $usage    = <<EOF;
+usage:
+  $cmd_name [--] [<url>]   # open the url or reload
+  $cmd_name -q             # close the web browser
+  $cmd_name -h             # print usage
+
+environment-variables:
+  FFPREVPID    # the path of the pid-file (default: /tmp/\$USER.ffprev.pid)
+  FFPREVSID    # the path of the sid-file (default: /tmp/\$USER.ffprev.sid)
+  FFPREVBIN    # the firefox-binary used by geckodriver (default: default firefox)
+  FFPREVPORT   # the port used by geckodriver (default: 4444)
+EOF
+
+my $endpoint = "http://localhost:$FFPREVPORT";
+
+sub read_file {
+    my ($file_name) = @_;
+    open my $fh, "<", $file_name or die $!;
+    my $content = do { local $/; <$fh> };
+    close $fh or die $!;
+    return $content;
+}
+
+sub write_file {
+    my ($file_name, $content) = @_;
+    open my $fh, ">", $file_name or die $!;
+    print $fh $content;
+    close $fh or die $!;
+}
+
+sub daemonize {
+    my $pid = fork;
+    die $! if not defined $pid;
+
+    if ($pid == 0) {
+        umask 0;
+        setsid or die $!;
+        chdir "/" or die $!;
+        open STDIN, ">/dev/null";
+        open STDOUT, ">/dev/null";
+        open STDERR, ">/dev/null";
+    }
+
+    return $pid;
+}
+
+my $bg_pid;
+if (-f $FFPREVPID) {
+    eval {
+        $bg_pid = read_file $FFPREVPID;
+        chomp $bg_pid;
+    };
+    if ($@) {
+        print STDERR "$cmd_name: $@\n";
+        exit 1;
+    }
+}
+
+if (@ARGV == 0 || $ARGV[0] eq "--" || $ARGV[0] !~ /^-/) {
+
+    if (@ARGV >= 1 && $ARGV[0] eq "--") {
+        shift @ARGV;
+    }
+    my $url = $ARGV[0];
+
+    if (not defined $bg_pid) {
+        my $new_bg_pid;
+        eval {
+            $new_bg_pid = daemonize;
+            if ($new_bg_pid == 0) {
+                my $geckodriver_pid;
+                eval {
+                    $geckodriver_pid = fork;
+                    if ($geckodriver_pid == 0) {
+                        my $geckodriver_cmd = ["geckodriver"];
+                        if (defined $FFPREVPORT) {
+                            push @$geckodriver_cmd, "-p", $FFPREVPORT;
+                        }
+                        if (defined $FFPREVBIN) {
+                            push @$geckodriver_cmd, "-b", $FFPREVBIN;
+                        }
+                        exec "geckodriver" or die $!;
+                    }
+                };
+                if ($@) {
+                    print STDERR "$cmd_name: $@\n";
+                    unlink $FFPREVPID;
+                    exit 1;
+                }
+
+                local $SIG{TERM} = sub {
+                    kill "TERM", $geckodriver_pid;
+                    unlink $FFPREVPID;
+                    unlink $FFPREVSID;
+                    exit 0;
+                };
+
+                my $kid;
+                do {
+                    $kid = waitpid $geckodriver_pid, 0;
+                } while $kid > 0;
+                exit 0;
+            }
+
+            write_file $FFPREVPID, "$new_bg_pid\n";
+        };
+        if ($@) {
+            print STDERR "$cmd_name: $@\n";
+            kill "TERM", $new_bg_pid;
+            unlink $FFPREVPID;
+            exit 1;
+        }
+        sleep 1;
+    }
+
+    my $http = HTTP::Tiny->new;
+
+    my $sid;
+    if (-f $FFPREVSID) {
+        eval {
+            $sid = read_file $FFPREVSID;
+            chomp $sid;
+        };
+        if ($@) {
+            print STDERR "$cmd_name: $@\n";
+            exit 1;
+        }
+    } else {
+        eval {
+            my $resp = $http->post("$endpoint/session", {
+                    headers => {"Content-Type" => "application/json"},
+                    content => "{}",
+                });
+            die $resp->{content} if not $resp->{success};
+
+            my $body = decode_json $resp->{content};
+            $sid = $body->{value}{sessionId};
+            write_file $FFPREVSID, "$sid\n";
+        };
+        if ($@) {
+            print STDERR "$cmd_name: $@\n";
+            if (defined $sid) {
+                eval {
+                    $http->delete("$endpoint/session/$sid");
+                };
+            }
+            exit 1;
+        }
+    }
+
+    eval {
+        if (defined $url) {
+            $http->post("$endpoint/session/$sid/url", {
+                    headers => {"Content-Type" => "application/json"},
+                    content => encode_json {"url" => $url},
+                });
+        } else {
+            $http->post("$endpoint/session/$sid/refresh", {
+                    headers => {"Content-Type" => "application/json"},
+                    content => "{}",
+                });
+        }
+    };
+    if ($@) {
+        print STDERR "$cmd_name: $@\n";
+        exit 1;
+    }
+
+} elsif ($ARGV[0] eq "-q") {
+
+    my $sid;
+    if (-f $FFPREVSID) {
+        eval {
+            $sid = read_file $FFPREVSID;
+            chomp $sid;
+        };
+        if ($@) {
+            print STDERR "$cmd_name: $@\n";
+            exit 1;
+        }
+    }
+
+    if (defined $sid) {
+        eval {
+            my $http = HTTP::Tiny->new;
+            $http->delete("$endpoint/session/$sid/window");
+        };
+    }
+    if (defined $bg_pid) {
+        kill "TERM", $bg_pid;
+        unlink $FFPREVPID;
+        unlink $FFPREVSID;
+    }
+
+} elsif ($ARGV[0] eq "-h") {
+
+    print $usage;
+
+} else {
+
+    print STDERR "$cmd_name: cannot recognize arguments\n";
+    exit 1;
+
+}
