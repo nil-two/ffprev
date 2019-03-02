@@ -11,7 +11,7 @@ my $FFPREVBIN  = $ENV{FFPREVBIN};
 my $FFPREVPORT = $ENV{FFPREVPORT} // 4444;
 
 my $cmd_name = $0 =~ s/.*\///r;
-my $usage    = <<EOF;
+my $usage = <<EOF;
 usage:
   $cmd_name [--] [<url>]   # open the url or reload
   $cmd_name -q             # close the web browser
@@ -52,16 +52,17 @@ sub daemonize {
         open STDIN, ">/dev/null";
         open STDOUT, ">/dev/null";
         open STDERR, ">/dev/null";
+        return $pid;
+    } else {
+        return $pid;
     }
-
-    return $pid;
 }
 
-my $bg_pid;
+my $ffprev_pid;
 if (-f $FFPREVPID) {
     eval {
-        $bg_pid = read_file $FFPREVPID;
-        chomp $bg_pid;
+        $ffprev_pid = read_file $FFPREVPID;
+        chomp $ffprev_pid;
     };
     if ($@) {
         print STDERR "$cmd_name: $@\n";
@@ -76,14 +77,14 @@ if (@ARGV == 0 || $ARGV[0] eq "--" || $ARGV[0] !~ /^-/) {
     }
     my $url = $ARGV[0];
 
-    if (not defined $bg_pid) {
-        my $new_bg_pid;
+    if (not defined $ffprev_pid) {
         eval {
-            $new_bg_pid = daemonize;
-            if ($new_bg_pid == 0) {
+            $ffprev_pid = daemonize;
+            if ($ffprev_pid == 0) {
                 my $geckodriver_pid;
                 eval {
                     $geckodriver_pid = fork;
+                    die $! if not defined $geckodriver_pid;
                     if ($geckodriver_pid == 0) {
                         my $geckodriver_cmd = ["geckodriver"];
                         if (defined $FFPREVPORT) {
@@ -93,6 +94,18 @@ if (@ARGV == 0 || $ARGV[0] eq "--" || $ARGV[0] !~ /^-/) {
                             push @$geckodriver_cmd, "-b", $FFPREVBIN;
                         }
                         exec @$geckodriver_cmd or die $!;
+                    } else {
+                        local $SIG{TERM} = sub {
+                            kill "TERM", $geckodriver_pid;
+                            unlink $FFPREVPID;
+                            unlink $FFPREVSID;
+                            exit 0;
+                        };
+                        my $kid;
+                        do {
+                            $kid = waitpid $geckodriver_pid, 0;
+                        } while $kid > 0;
+                        exit 0;
                     }
                 };
                 if ($@) {
@@ -100,26 +113,13 @@ if (@ARGV == 0 || $ARGV[0] eq "--" || $ARGV[0] !~ /^-/) {
                     unlink $FFPREVPID;
                     exit 1;
                 }
-
-                local $SIG{TERM} = sub {
-                    kill "TERM", $geckodriver_pid;
-                    unlink $FFPREVPID;
-                    unlink $FFPREVSID;
-                    exit 0;
-                };
-
-                my $kid;
-                do {
-                    $kid = waitpid $geckodriver_pid, 0;
-                } while $kid > 0;
-                exit 0;
+            } else {
+                write_file $FFPREVPID, "$ffprev_pid\n";
             }
-
-            write_file $FFPREVPID, "$new_bg_pid\n";
         };
         if ($@) {
             print STDERR "$cmd_name: $@\n";
-            kill "TERM", $new_bg_pid;
+            kill "TERM", $ffprev_pid;
             unlink $FFPREVPID;
             exit 1;
         }
@@ -199,8 +199,8 @@ if (@ARGV == 0 || $ARGV[0] eq "--" || $ARGV[0] !~ /^-/) {
             $http->delete("$endpoint/session/$sid/window");
         };
     }
-    if (defined $bg_pid) {
-        kill "TERM", $bg_pid;
+    if (defined $ffprev_pid) {
+        kill "TERM", $ffprev_pid;
         unlink $FFPREVPID;
         unlink $FFPREVSID;
     }
