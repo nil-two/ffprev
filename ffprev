@@ -92,7 +92,7 @@ if (@ARGV == 0 || $ARGV[0] eq "--" || $ARGV[0] !~ /^-/) {
                         if (defined $FFPREVBIN) {
                             push @$geckodriver_cmd, "-b", $FFPREVBIN;
                         }
-                        exec "geckodriver" or die $!;
+                        exec @$geckodriver_cmd or die $!;
                     }
                 };
                 if ($@) {
