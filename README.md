@@ -35,7 +35,7 @@ Installation
 ### Example
 
 ```
-$ curl -L https://raw.githubusercontent.com/nil2nekoni2/ffprev/master/ffprev > ~/bin/ffprev
+$ curl -L https://raw.githubusercontent.com/nil-two/ffprev/master/ffprev > ~/bin/ffprev
 $ chmod +x ~/bin/ffprev
 ```
 
